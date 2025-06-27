@@ -1,0 +1,18 @@
+# Build outputs
+main.js
+main.js.map
+*.tsbuildinfo
+
+# Dependencies
+node_modules/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

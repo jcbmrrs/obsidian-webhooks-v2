@@ -1,0 +1,11 @@
+{
+	"id": "obsidian-webhooks-v2",
+	"name": "Webhooks v2",
+	"version": "2.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Receive webhooks and create/update notes in your vault via a Go backend with real-time SSE updates",
+	"author": "trashhalo",
+	"authorUrl": "https://github.com/trashhalo",
+	"fundingUrl": "https://github.com/trashhalo/obsidian-webhooks-v2",
+	"isDesktopOnly": false
+}

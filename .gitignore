@@ -1,0 +1,15 @@
+# Binaries
+webhooks-server
+*.exe
+
+# Database
+*.db
+
+# Go
+go.sum
+
+# OS
+.DS_Store
+
+# Environment
+.env

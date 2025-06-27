@@ -1,0 +1,22 @@
+# Binaries
+webhooks-server
+*.exe
+
+# Database
+*.db
+
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+
+# Plugin source (not needed for server)
+plugin/
+
+# OS
+.DS_Store
+
+# Environment
+.env

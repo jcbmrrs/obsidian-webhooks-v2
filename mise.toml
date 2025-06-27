@@ -1,0 +1,74 @@
+[tools]
+go = "1.24.4"
+bun = "latest"
+
+[tasks.build]
+description = "Build the Go server binary"
+run = "go build -o webhooks-server main.go"
+
+[tasks.dev]
+description = "Run server with development token"
+run = "AUTH_TOKEN=dev-secret ./webhooks-server"
+depends = ["build"]
+
+[tasks.deploy]
+description = "Hot reload deployment (zero downtime)"
+run = """
+echo "Building new version..."
+go build -o webhooks-server-new main.go
+echo "Swapping binaries..."
+mv webhooks-server webhooks-server-old 2>/dev/null || true
+mv webhooks-server-new webhooks-server
+echo "Triggering hot reload..."
+kill -USR2 $(pgrep webhooks-server) || echo "Server not running, start with 'mise run dev'"
+echo "Deployment complete!"
+"""
+
+[tasks.plugin-build]
+description = "Build the Obsidian plugin"
+run = "cd plugin && bun install && bun run build"
+
+[tasks.plugin-dev]
+description = "Build plugin in watch mode"
+run = "cd plugin && bun install && bun run dev"
+
+[tasks.test]
+description = "Run all Go tests"
+run = "go test -v ./..."
+
+[tasks.test-unit]
+description = "Run unit tests only"
+run = "go test -v -run 'Test.*' -short ./..."
+
+[tasks.test-integration]
+description = "Run integration tests only"
+run = "go test -v -run 'TestFull|TestConcurrent|TestSSE|TestError' ./..."
+
+[tasks.test-bench]
+description = "Run benchmark tests"
+run = "go test -v -bench=. ./..."
+
+[tasks.test-coverage]
+description = "Run tests with coverage report"
+run = "go test -v -coverprofile=coverage.out ./... && go tool cover -html=coverage.out -o coverage.html"
+
+[tasks.test-webhook]
+description = "Test live webhook endpoint"
+run = """
+if ! pgrep webhooks-server > /dev/null; then
+  echo "Server not running. Start with 'mise run dev' first."
+  exit 1
+fi
+echo "Testing webhook endpoint..."
+curl -X POST "http://localhost:8080/webhook/test-key?path=test.md" \
+  -H "Content-Type: text/plain" \
+  -d "Test webhook at $(date)"
+"""
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = """
+rm -f webhooks-server webhooks-server-old webhooks-server-new
+rm -f webhooks.db
+cd plugin && rm -f main.js main.js.map
+"""
