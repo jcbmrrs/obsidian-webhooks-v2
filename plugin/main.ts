@@ -12,12 +12,14 @@ interface MyPluginSettings {
 	endpoint: string;
 	clientKey: string;
 	newlineType: "none" | "windows" | "unix";
+	processedEventIds: string[];
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
 	endpoint: "http://localhost:8080",
 	clientKey: "",
 	newlineType: "none",
+	processedEventIds: [],
 };
 
 export default class ObsidianWebhooksPlugin extends Plugin {
@@ -28,8 +30,13 @@ export default class ObsidianWebhooksPlugin extends Plugin {
 	async onload() {
 		console.log("loading obsidian-webhooks v2 plugin");
 		await this.loadSettings();
+
+		// Load persisted processed event IDs into the Set
+		this.processedEvents = new Set(this.settings.processedEventIds);
+		console.log(`Loaded ${this.processedEvents.size} processed event IDs from storage`);
+
 		this.addSettingTab(new WebhookSettingTab(this.app, this));
-		
+
 		if (this.settings.clientKey) {
 			this.connect();
 		}
@@ -57,21 +64,19 @@ export default class ObsidianWebhooksPlugin extends Plugin {
 		this.eventSource.onmessage = async (event) => {
 			try {
 				const webhookEvent: WebhookEvent = JSON.parse(event.data);
-				
+
 				// Skip if we've already processed this event
 				if (this.processedEvents.has(webhookEvent.id)) {
+					console.log(`Skipping already processed event: ${webhookEvent.id}`);
 					return;
 				}
-				
+
 				await this.applyEvent(webhookEvent);
 				this.processedEvents.add(webhookEvent.id);
-				
-				// Keep set size reasonable
-				if (this.processedEvents.size > 1000) {
-					const entries = Array.from(this.processedEvents);
-					this.processedEvents = new Set(entries.slice(-500));
-				}
-				
+
+				// Persist the updated set (with size management)
+				await this.persistProcessedEvents();
+
 			} catch (err) {
 				console.error("Error processing webhook event:", err);
 				new Notice("Error processing webhook event: " + err.message);
@@ -135,6 +140,18 @@ export default class ObsidianWebhooksPlugin extends Plugin {
 			console.error("Error applying event:", err);
 			throw err;
 		}
+	}
+
+	async persistProcessedEvents() {
+		// Keep set size reasonable (keep last 1000 events)
+		if (this.processedEvents.size > 1000) {
+			const entries = Array.from(this.processedEvents);
+			this.processedEvents = new Set(entries.slice(-1000));
+		}
+
+		// Save to settings
+		this.settings.processedEventIds = Array.from(this.processedEvents);
+		await this.saveSettings();
 	}
 
 	async loadSettings() {
