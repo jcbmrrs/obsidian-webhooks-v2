@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -105,6 +106,7 @@ func main() {
 		r.Post("/rotate-webhook-key", s.rotateWebhookKeyHandler)
 		r.Post("/rotate-client-key", s.rotateClientKeyHandler)
 		r.Delete("/events/{eventID}", s.deleteEventHandler)
+		r.Post("/bulk-update-paths", s.bulkUpdatePathsHandler)
 		r.Get("/logout", s.logoutHandler)
 	})
 
@@ -599,6 +601,143 @@ func (s *Server) deleteEventHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("ok"))
+}
+
+func (s *Server) bulkUpdatePathsHandler(w http.ResponseWriter, r *http.Request) {
+	userID := r.Context().Value("userID").(string)
+
+	// Parse request body
+	var req struct {
+		OldPrefix string `json:"oldPrefix"`
+		NewPrefix string `json:"newPrefix"`
+		Preview   bool   `json:"preview"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.OldPrefix == "" || req.NewPrefix == "" {
+		http.Error(w, "oldPrefix and newPrefix are required", http.StatusBadRequest)
+		return
+	}
+
+	type PathUpdate struct {
+		EventID string `json:"eventId"`
+		OldPath string `json:"oldPath"`
+		NewPath string `json:"newPath"`
+	}
+
+	var updates []PathUpdate
+	var totalEvents int
+
+	// Scan events and collect updates
+	err := s.db.View(func(tx *bolt.Tx) error {
+		eventsBucket := tx.Bucket([]byte("events"))
+		if eventsBucket == nil {
+			return nil
+		}
+
+		userBucket := eventsBucket.Bucket([]byte(userID))
+		if userBucket == nil {
+			return nil
+		}
+
+		return userBucket.ForEach(func(k, v []byte) error {
+			totalEvents++
+
+			var event WebhookEvent
+			if err := json.Unmarshal(v, &event); err != nil {
+				log.Printf("Warning: failed to unmarshal event: %v", err)
+				return nil
+			}
+
+			// Check if path starts with old prefix
+			if strings.HasPrefix(event.Path, req.OldPrefix) {
+				newPath := req.NewPrefix + strings.TrimPrefix(event.Path, req.OldPrefix)
+				updates = append(updates, PathUpdate{
+					EventID: event.ID,
+					OldPath: event.Path,
+					NewPath: newPath,
+				})
+			}
+
+			return nil
+		})
+	})
+
+	if err != nil {
+		log.Printf("Error scanning events: %v", err)
+		http.Error(w, "Failed to scan events", http.StatusInternalServerError)
+		return
+	}
+
+	// If preview mode, return the updates without applying
+	if req.Preview {
+		response := map[string]interface{}{
+			"preview":       true,
+			"totalEvents":   totalEvents,
+			"matchedEvents": len(updates),
+			"updates":       updates,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Apply updates
+	var updatedCount int
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		eventsBucket := tx.Bucket([]byte("events"))
+		if eventsBucket == nil {
+			return nil
+		}
+
+		userBucket := eventsBucket.Bucket([]byte(userID))
+		if userBucket == nil {
+			return nil
+		}
+
+		return userBucket.ForEach(func(k, v []byte) error {
+			var event WebhookEvent
+			if err := json.Unmarshal(v, &event); err != nil {
+				return nil
+			}
+
+			// Check if this event should be updated
+			if strings.HasPrefix(event.Path, req.OldPrefix) {
+				event.Path = req.NewPrefix + strings.TrimPrefix(event.Path, req.OldPrefix)
+
+				// Save updated event
+				updatedData, err := json.Marshal(event)
+				if err != nil {
+					return err
+				}
+
+				if err := userBucket.Put(k, updatedData); err != nil {
+					return err
+				}
+
+				updatedCount++
+			}
+
+			return nil
+		})
+	})
+
+	if err != nil {
+		log.Printf("Error applying updates: %v", err)
+		http.Error(w, "Failed to apply updates", http.StatusInternalServerError)
+		return
+	}
+
+	// Return success response
+	response := map[string]interface{}{
+		"success":      true,
+		"updatedCount": updatedCount,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 func generateID() string {
