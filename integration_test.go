@@ -33,7 +33,7 @@ func setupIntegrationTestServer(t *testing.T) (*Server, *httptest.Server) {
 
 	// Initialize buckets
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, bucket := range []string{"events", "users", "keys"} {
+		for _, bucket := range []string{"events", "users", "webhook_keys", "client_keys"} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
 				return err
 			}
@@ -73,6 +73,9 @@ func setupIntegrationTestServer(t *testing.T) (*Server, *httptest.Server) {
 		r.Get("/", s.dashboardHandler)
 		r.Get("/dashboard", s.dashboardHandler)
 		r.Post("/generate-token", s.generateTokenHandler)
+		r.Post("/rotate-webhook-key", s.rotateWebhookKeyHandler)
+		r.Post("/rotate-client-key", s.rotateClientKeyHandler)
+		r.Delete("/events/{eventID}", s.deleteEventHandler)
 		r.Get("/logout", s.logoutHandler)
 	})
 
@@ -408,4 +411,151 @@ func TestErrorHandling(t *testing.T) {
 	}
 
 	t.Log("✅ Error handling tests passed")
+}
+
+func TestDeleteEvent(t *testing.T) {
+	s, ts := setupIntegrationTestServer(t)
+
+	userID := "default" // Must match the userID in the JWT from login
+	webhookKey := "wh_test123"
+
+	// Setup: Create webhook key mapping
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("webhook_keys"))
+		return b.Put([]byte(webhookKey), []byte(userID))
+	})
+	if err != nil {
+		t.Fatalf("Failed to setup webhook key: %v", err)
+	}
+
+	// Create some test events
+	eventIDs := []string{}
+	for i := 0; i < 3; i++ {
+		resp, err := http.Post(
+			fmt.Sprintf("%s/webhook/%s?path=test-%d.md", ts.URL, webhookKey, i),
+			"text/plain",
+			strings.NewReader(fmt.Sprintf("Test content %d", i)),
+		)
+		if err != nil {
+			t.Fatalf("Failed to create test event: %v", err)
+		}
+		resp.Body.Close()
+	}
+
+	// Get event IDs from database
+	err = s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("events"))
+		userBucket := b.Bucket([]byte(userID))
+		if userBucket == nil {
+			return fmt.Errorf("user bucket not found")
+		}
+
+		return userBucket.ForEach(func(k, v []byte) error {
+			var event WebhookEvent
+			if err := json.Unmarshal(v, &event); err == nil {
+				eventIDs = append(eventIDs, event.ID)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		t.Fatalf("Failed to get event IDs: %v", err)
+	}
+
+	if len(eventIDs) != 3 {
+		t.Fatalf("Expected 3 events, got %d", len(eventIDs))
+	}
+
+	// Login to get auth token
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	loginResp, err := client.PostForm(ts.URL+"/login", map[string][]string{
+		"token": {"integration-test-token"},
+	})
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+	defer loginResp.Body.Close()
+
+	var authCookie *http.Cookie
+	for _, cookie := range loginResp.Cookies() {
+		if cookie.Name == "auth_token" {
+			authCookie = cookie
+			break
+		}
+	}
+
+	if authCookie == nil {
+		t.Fatal("No auth cookie received")
+	}
+
+	// Test: Delete first event
+	req, _ := http.NewRequest("DELETE", ts.URL+"/events/"+eventIDs[0], nil)
+	req.AddCookie(authCookie)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Delete request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected status 200, got %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Verify event was deleted
+	var remainingCount int
+	err = s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("events"))
+		userBucket := b.Bucket([]byte(userID))
+		if userBucket == nil {
+			return fmt.Errorf("user bucket not found")
+		}
+
+		return userBucket.ForEach(func(k, v []byte) error {
+			remainingCount++
+			return nil
+		})
+	})
+	if err != nil {
+		t.Fatalf("Failed to verify deletion: %v", err)
+	}
+
+	if remainingCount != 2 {
+		t.Errorf("Expected 2 remaining events, got %d", remainingCount)
+	}
+
+	// Test: Delete non-existent event
+	req, _ = http.NewRequest("DELETE", ts.URL+"/events/nonexistent", nil)
+	req.AddCookie(authCookie)
+
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("Delete request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected status 404 for non-existent event, got %d", resp.StatusCode)
+	}
+
+	// Test: Delete without authentication
+	req, _ = http.NewRequest("DELETE", ts.URL+"/events/"+eventIDs[1], nil)
+
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("Delete request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("Expected redirect to login (303) without auth, got %d", resp.StatusCode)
+	}
+
+	t.Log("✅ Delete event tests passed")
 }
