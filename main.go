@@ -104,6 +104,7 @@ func main() {
 		r.Post("/generate-token", s.generateTokenHandler)
 		r.Post("/rotate-webhook-key", s.rotateWebhookKeyHandler)
 		r.Post("/rotate-client-key", s.rotateClientKeyHandler)
+		r.Delete("/events/{eventID}", s.deleteEventHandler)
 		r.Get("/logout", s.logoutHandler)
 	})
 
@@ -537,6 +538,67 @@ func (s *Server) rotateClientKeyHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+}
+
+func (s *Server) deleteEventHandler(w http.ResponseWriter, r *http.Request) {
+	userID := r.Context().Value("userID").(string)
+	eventID := chi.URLParam(r, "eventID")
+
+	if eventID == "" {
+		http.Error(w, "Event ID required", http.StatusBadRequest)
+		return
+	}
+
+	// Find and delete the event
+	var found bool
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("events"))
+		if b == nil {
+			return nil // No events bucket means no events to delete
+		}
+
+		userBucket := b.Bucket([]byte(userID))
+		if userBucket == nil {
+			return nil // No user bucket means no events for this user
+		}
+
+		// Find the key that ends with this eventID
+		var keyToDelete []byte
+		err := userBucket.ForEach(func(k, v []byte) error {
+			var event WebhookEvent
+			if err := json.Unmarshal(v, &event); err == nil {
+				if event.ID == eventID {
+					keyToDelete = make([]byte, len(k))
+					copy(keyToDelete, k)
+					found = true
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		if keyToDelete != nil {
+			return userBucket.Delete(keyToDelete)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		log.Printf("Error deleting event %s: %v", eventID, err)
+		http.Error(w, "Failed to delete event", http.StatusInternalServerError)
+		return
+	}
+
+	if !found {
+		http.Error(w, "Event not found", http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("ok"))
 }
 
 func generateID() string {
